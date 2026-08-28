@@ -1,0 +1,396 @@
+---
+- name: Apache2 Redirector Installation
+  hosts: "redirector_servers:&operation_{{ lookup('env', 'OPERATION_NAME') | default('unknown_op') }}"
+  become: true
+  gather_facts: true  # Need facts for AWS metadata
+  serial: 1  # Process one host at a time
+  # Variables are now in group_vars/redirector_servers.yml
+
+  vars:
+    # Connection optimization
+    ansible_ssh_pipelining: true
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=60 -o ServerAliveCountMax=3'
+
+  tasks:
+    # === Connection test ===
+    - name: Test connectivity before proceeding
+      ansible.builtin.ping:
+      retries: 3
+      delay: 5
+
+    # === Validate and set IP variables from deployer ===
+    - name: Validate required IPs from deployer
+      ansible.builtin.assert:
+        that:
+          - redirector_public_ip is defined
+          - c2_private_ip is defined
+        fail_msg: |
+          Required IP addresses not provided by deployer.
+          This playbook should be run via deployer.py which passes the IPs from Terraform.
+          redirector_public_ip: {{ redirector_public_ip | default('NOT SET') }}
+          c2_private_ip: {{ c2_private_ip | default('NOT SET') }}
+
+    - name: Set redirector external IP alias
+      ansible.builtin.set_fact:
+        redirector_external_ip: "{{ redirector_public_ip }}"
+
+    # === Set C2 port (configurable) ===
+    - name: Set C2 port from variables or default
+      ansible.builtin.set_fact:
+        c2_redirect_port: "{{ c2_redirect_port | default('5001') }}"
+
+    # === Set C2 ports for WebSocket, HTTP, and MinIO ===
+    - name: Set C2 WebSocket, HTTP, and MinIO ports
+      ansible.builtin.set_fact:
+        c2_websocket_port: "{{ c2_websocket_port | default('8765') }}"
+        c2_http_port: "{{ c2_http_port | default('5001') }}"
+        c2_minio_port: "{{ c2_minio_port | default('4000') }}"
+
+    # === Display detected configuration ===
+    - name: Display detected C2 configuration
+      ansible.builtin.debug:
+        msg: |
+          Infrastructure Configuration:
+
+          REDIRECTOR SERVER:
+          - External IP: {{ redirector_external_ip }}
+          - Private IP: {{ redirector_private_ip | default('N/A') }}
+
+          C2 SERVER:
+          - Private IP: {{ c2_private_ip }}
+          - Public IP: {{ c2_public_ip | default('N/A') }}
+
+          VPN SERVER:
+          - Private IP: {{ vpn_private_ip | default('N/A') }}
+          - Public IP: {{ vpn_public_ip | default('N/A') }}
+
+          ATTACK SERVER:
+          - Private IP: {{ attack_private_ip | default('N/A') }}
+          - Public IP: {{ attack_public_ip | default('N/A') }}
+
+          C2 REDIRECTION TARGETS:
+          - WebSocket: ws://{{ c2_private_ip }}:{{ c2_websocket_port }}
+          - HTTP: http://{{ c2_private_ip }}:{{ c2_http_port }}
+
+    # === Pre-flight checks ===
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - redirector_external_ip is defined and redirector_external_ip != ""
+          - c2_private_ip is defined and c2_private_ip != ""
+        fail_msg: "Required variables (redirector_external_ip, c2_private_ip) must be defined"
+
+    # === Package installation ===
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name: "{{ redirector_packages }}"
+        state: present
+
+    - name: Install Python packages for AWS integration
+      ansible.builtin.pip:
+        name:
+          - boto3
+          - botocore
+        state: present
+        break_system_packages: true
+
+    # === Let's Encrypt / Certbot installation (if using CloudFront) ===
+    - name: Install certbot and Route53 plugin
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - python3-certbot-dns-route53
+        state: present
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    # === Apache configuration ===
+    - name: Enable Apache modules for redirector
+      community.general.apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ apache_modules }}"
+      register: apache_modules_result
+      notify: Restart Apache
+
+    # === Apache configuration file management ===
+    - name: Create backup of original apache2.conf
+      ansible.builtin.copy:
+        src: /etc/apache2/apache2.conf
+        dest: /etc/apache2/apache2.conf.original
+        remote_src: true
+        force: false
+        backup: true
+        mode: "0644"
+
+    - name: Deploy custom apache2.conf from template
+      ansible.builtin.template:
+        src: apache2.conf.j2
+        dest: /etc/apache2/apache2.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      notify: Restart Apache
+
+    # === Security configuration ===
+    - name: Create security configuration file
+      ansible.builtin.copy:
+        dest: /etc/apache2/conf-available/security.conf
+        content: |
+          # Hide Apache version and OS
+          ServerTokens Prod
+          ServerSignature Off
+
+          # Disable HTTP TRACE method
+          TraceEnable Off
+
+          # Prevent access to .htaccess and other sensitive files
+          <FilesMatch "^\.">
+              Require all denied
+          </FilesMatch>
+
+          # Prevent access to version control directories
+          <DirectoryMatch "/\.git">
+              Require all denied
+          </DirectoryMatch>
+        mode: '0644'
+      notify: Restart Apache
+
+    - name: Enable security configuration
+      ansible.builtin.command: a2enconf security
+      args:
+        creates: /etc/apache2/conf-enabled/security.conf
+      register: security_conf_result
+      notify: Restart Apache
+
+    # === SSL Certificate setup ===
+    - name: Ensure SSL directories have correct permissions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: root
+        group: root
+        state: directory
+      loop:
+        - { path: "/etc/ssl/private", mode: "0700" }
+        - { path: "/etc/ssl/certs", mode: "0755" }
+
+    # --- Let's Encrypt Certificate (when CloudFront/subdomain is configured) ---
+    - name: Check if Let's Encrypt certificate already exists
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ c2_subdomain }}/fullchain.pem"
+      register: letsencrypt_cert
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    - name: Request Let's Encrypt certificate via DNS-01 challenge
+      ansible.builtin.command:
+        cmd: >
+          certbot certonly
+          --dns-route53
+          --dns-route53-propagation-seconds 60
+          --non-interactive
+          --agree-tos
+          --email ops@{{ c2_subdomain.split('.')[-2:] | join('.') }}
+          -d {{ c2_subdomain }}
+        creates: "/etc/letsencrypt/live/{{ c2_subdomain }}/fullchain.pem"
+      when:
+        - c2_subdomain is defined and c2_subdomain != ""
+        - not (letsencrypt_cert.stat.exists | default(false))
+      register: certbot_result
+
+    - name: Set SSL paths for Let's Encrypt certificate
+      ansible.builtin.set_fact:
+        ssl_cert_path: "/etc/letsencrypt/live/{{ c2_subdomain }}/fullchain.pem"
+        ssl_key_path: "/etc/letsencrypt/live/{{ c2_subdomain }}/privkey.pem"
+        ssl_chain_path: "/etc/letsencrypt/live/{{ c2_subdomain }}/chain.pem"
+        using_letsencrypt: true
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    - name: Enable certbot automatic renewal timer
+      ansible.builtin.systemd:
+        name: certbot.timer
+        enabled: true
+        state: started
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    - name: Ensure certbot renewal hooks directory exists
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        mode: '0755'
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    - name: Configure certbot renewal hook to reload Apache
+      ansible.builtin.copy:
+        dest: /etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh
+        content: |
+          #!/bin/bash
+          systemctl reload apache2
+        mode: '0755'
+      when: c2_subdomain is defined and c2_subdomain != ""
+
+    # --- Self-signed Certificate (fallback when no subdomain) ---
+    - name: Generate modern ECDSA private key (P-256 curve)
+      community.crypto.openssl_privatekey:
+        path: "{{ ssl_key_path }}"
+        type: ECC
+        curve: secp256r1  # P-256 curve - widely supported and secure
+        owner: root
+        group: root
+        mode: '0600'
+        state: present
+      when: c2_subdomain is not defined or c2_subdomain == ""
+
+    - name: Generate self-signed ECDSA SSL certificate
+      community.crypto.x509_certificate:
+        path: "{{ ssl_cert_path }}"
+        privatekey_path: "{{ ssl_key_path }}"
+        provider: selfsigned
+        selfsigned_not_before: "+0s"
+        selfsigned_not_after: "+365d"
+        selfsigned_digest: "sha256"
+        owner: root
+        group: root
+        mode: '0644'
+        state: present
+      when: c2_subdomain is not defined or c2_subdomain == ""
+
+    - name: Set using_letsencrypt to false for self-signed
+      ansible.builtin.set_fact:
+        using_letsencrypt: false
+      when: c2_subdomain is not defined or c2_subdomain == ""
+
+    # Note: DH parameters are no longer needed with elliptic curve cryptography
+    # ECDHE (Elliptic Curve Diffie-Hellman Ephemeral) provides better security
+    # and performance than traditional DH parameters
+
+    # === Site configuration ===
+    - name: Create SSL site configuration from template
+      ansible.builtin.template:
+        src: apache-default-ssl.conf.j2
+        dest: /etc/apache2/sites-available/default-ssl.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      notify: Restart Apache
+
+    - name: Disable default Apache sites
+      ansible.builtin.command: "a2dissite {{ item }}"
+      loop:
+        - "000-default"
+        - "default-ssl"
+      args:
+        removes: "/etc/apache2/sites-enabled/{{ item }}.conf"
+      ignore_errors: true
+
+    - name: Enable SSL site
+      ansible.builtin.command: a2ensite default-ssl.conf
+      args:
+        creates: /etc/apache2/sites-enabled/default-ssl.conf
+      register: ssl_site_result
+      notify: Restart Apache
+
+    # === Redirector rules configuration ===
+    - name: Create .htaccess from template
+      ansible.builtin.template:
+        src: apache-htaccess.j2
+        dest: "{{ document_root }}/.htaccess"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      register: htaccess_result
+      notify: Restart Apache
+
+
+    # === CloudWatch Agent for centralized logging ===
+    - name: Download CloudWatch Agent
+      ansible.builtin.get_url:
+        url: "https://s3.amazonaws.com/amazoncloudwatch-agent/debian/amd64/latest/amazon-cloudwatch-agent.deb"
+        dest: /tmp/amazon-cloudwatch-agent.deb
+        mode: '0644'
+      retries: 3
+      delay: 5
+
+    - name: Install CloudWatch Agent
+      ansible.builtin.apt:
+        deb: /tmp/amazon-cloudwatch-agent.deb
+      register: cloudwatch_agent_installed
+
+    - name: Clean up CloudWatch Agent installer
+      ansible.builtin.file:
+        path: /tmp/amazon-cloudwatch-agent.deb
+        state: absent
+
+    - name: Ensure CloudWatch Agent config directory exists
+      ansible.builtin.file:
+        path: /opt/aws/amazon-cloudwatch-agent/etc
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Deploy CloudWatch Agent configuration
+      ansible.builtin.template:
+        src: cloudwatch-agent-apache.json.j2
+        dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+        owner: root
+        group: root
+        mode: '0644'
+      register: cloudwatch_config_deployed
+
+    - name: Start CloudWatch Agent with configuration
+      ansible.builtin.command:
+        cmd: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      when: cloudwatch_agent_installed.changed or cloudwatch_config_deployed.changed
+      changed_when: true
+      register: cloudwatch_agent_started
+
+    - name: Ensure CloudWatch Agent is running and enabled
+      ansible.builtin.systemd:
+        name: amazon-cloudwatch-agent
+        state: started
+        enabled: true
+
+
+    # === Service management ===
+    - name: Ensure Apache is running and enabled
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true
+      retries: 3
+      delay: 10
+
+    # === Final status display ===
+    - name: Display redirector status
+      ansible.builtin.debug:
+        msg:
+          - "Redirector (Apache) — Configuration Complete"
+          - ""
+          - "Status:"
+          - "  - Apache Modules Enabled:  {{ 'Yes' if apache_modules_result.changed else 'No' }}"
+          - "  - Security Config Enabled: {{ 'Yes' if security_conf_result.changed else 'No' }}"
+          - "  - SSL Certificate:         {{ 'Let\\'s Encrypt (' + c2_subdomain + ')' if using_letsencrypt | default(false) else 'Self-Signed' }}"
+          - "  - SSL Site Enabled:        {{ 'Yes' if ssl_site_result.changed else 'No' }}"
+          - "  - .htaccess Deployed:      {{ 'Yes' if htaccess_result.changed else 'No' }}"
+          - "  - CloudWatch Agent:        {{ 'Installed' if cloudwatch_agent_installed.changed else 'Already Present' }}"
+          - ""
+          - "Upstream (C2):"
+          - "  - C2 Private IP:   {{ c2_private_ip }}"
+          - "  - WebSocket Port:  {{ c2_websocket_port }}"
+          - "  - HTTP Port:       {{ c2_http_port }}"
+          - ""
+          - "Logging:"
+          - "  - Log Group:       /aws/ec2/{{ operation_name }}/apache"
+          - "  - Access Logs:     ssl_access.log -> CloudWatch"
+          - "  - Error Logs:      ssl_error.log -> CloudWatch"
+          - ""
+          - "Note: Apache will be started/restarted by handlers."
+
+  handlers:
+    - name: Restart Apache
+      ansible.builtin.service:
+        name: apache2
+        state: restarted

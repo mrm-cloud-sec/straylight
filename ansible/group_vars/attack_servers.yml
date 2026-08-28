@@ -1,0 +1,24 @@
+---
+# Variables specific to attack servers
+
+# Attack tools and packages
+attack_tools:
+  - nmap
+
+
+# Additional packages for attack servers
+attack_packages:
+  - git
+
+
+# Attack server specific users
+attack_users:
+  - name: user
+    groups: sudo
+    shell: /bin/bash
+
+# Custom directories for tools
+attack_directories:
+  - /home/user/tools
+  - /opt/attack-tools
+  - /home/user/wordlists

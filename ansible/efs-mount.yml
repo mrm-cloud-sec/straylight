@@ -1,0 +1,104 @@
+---
+- name: Mount EFS on C2 and Attack Servers
+  hosts: "c2_servers:attack_servers:&operation_{{ lookup('env', 'OPERATION_NAME') | default('unknown_op') }}"
+  become: true
+  gather_facts: true
+  serial: 1  # Process one host at a time to prevent overwhelming
+
+  vars:
+    # EFS mount point
+    efs_mount_point: "/mnt/shared"
+    # EFS DNS name from Terraform output (will be set by deployer)
+    efs_dns_name: "{{ lookup('env', 'TERRAFORM_EFS_DNS_NAME') | default('') }}"
+    # Connection optimization
+    ansible_ssh_pipelining: true
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=60 -o ServerAliveCountMax=3'
+
+  tasks:
+    # === Connection test ===
+    - name: Test connectivity before proceeding
+      ansible.builtin.ping:
+      retries: 3
+      delay: 5
+
+    # === Validation ===
+    - name: Validate EFS DNS name is available
+      ansible.builtin.assert:
+        that:
+          - efs_dns_name is defined and efs_dns_name != ""
+        fail_msg: "EFS DNS name must be provided via TERRAFORM_EFS_DNS_NAME environment variable"
+
+    # === Install NFS utilities ===
+    - name: Install NFS utilities
+      ansible.builtin.apt:
+        name:
+          - nfs-common
+        state: present
+      retries: 3
+      delay: 10
+
+    # === Create mount point ===
+    - name: Create EFS mount point directory
+      ansible.builtin.file:
+        path: "{{ efs_mount_point }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # === Mount EFS filesystem ===
+    - name: Mount EFS filesystem
+      ansible.posix.mount:
+        path: "{{ efs_mount_point }}"
+        src: "{{ efs_dns_name }}:/"
+        fstype: nfs4
+        opts: "nfsvers=4.1,rsize=1048576,wsize=1048576,hard,intr,timeo=600,retrans=2"
+        state: mounted
+        backup: true
+      register: mount_result
+      retries: 3
+      delay: 15
+      timeout: 120
+
+    # === Set proper permissions for admin user ===
+    - name: Set EFS mount point permissions for admin user
+      ansible.builtin.file:
+        path: "{{ efs_mount_point }}"
+        state: directory
+        owner: admin
+        group: admin
+        mode: '0755'
+      when: mount_result is succeeded
+
+    # === Create shared directories ===
+    - name: Create shared directories for the admin user
+      ansible.builtin.file:
+        path: "{{ efs_mount_point }}/{{ item }}"
+        state: directory
+        owner: admin
+        group: admin
+        mode: '0755'
+      loop:
+        - "logs"
+        - "tools"
+        - "payloads"
+        - "exfil"
+        - "configs"
+      when: mount_result is succeeded
+
+    # === Display results ===
+    - name: Display EFS mount results
+      ansible.builtin.debug:
+        msg:
+          - "EFS Mount Configuration Complete!"
+          - ""
+          - "Mount Status:  {{ 'Success' if mount_result is succeeded else 'Failed' }}"
+          - "  - Mount Point:   {{ efs_mount_point }}"
+          - "  - EFS DNS:       {{ efs_dns_name }}"
+          - ""
+          - "Shared Directories Created:"
+          - "  - {{ efs_mount_point }}/logs"
+          - "  - {{ efs_mount_point }}/tools"
+          - "  - {{ efs_mount_point }}/payloads"
+          - "  - {{ efs_mount_point }}/exfil"
+          - "  - {{ efs_mount_point }}/configs"

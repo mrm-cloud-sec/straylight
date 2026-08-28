@@ -1,0 +1,14 @@
+[project]
+name = "straylight-deployer"
+version = "0.1.0"
+description = "Automated red team infrastructure deployer for AWS"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ansible-core>=2.20.0",
+    "boto3>=1.34.0",
+    "botocore>=1.34.0",
+]
+
+[tool.uv]
+package = false

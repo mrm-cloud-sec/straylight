@@ -1,0 +1,45 @@
+---
+# Variables specific to redirector servers
+
+# Apache packages and modules
+redirector_packages:
+  - apache2
+  - openssl
+  - python3-pip
+
+apache_modules:
+  - rewrite
+  - proxy
+  - proxy_http
+  - ssl
+  - headers
+
+# SSL certificate paths - using modern ECDSA certificates
+ssl_cert_path: /etc/ssl/certs/apache-selfsigned.crt
+ssl_key_path: /etc/ssl/private/apache-selfsigned.key
+# Note: DH parameters no longer needed with elliptic curve cryptography
+
+# Apache document root
+document_root: /var/www/html
+
+# IP addresses - Multiple approaches available:
+# 
+# Approach 1: Auto-discovery from AWS EC2 facts (used in playbook)
+# redirector_external_ip and c2_private_ip are set dynamically in playbook tasks
+#
+# Approach 2: From Terraform outputs (if running from terraform directory)
+# redirector_external_ip: "{{ lookup('pipe', 'terraform output -raw redirector_public_ip') }}"
+# c2_private_ip: "{{ lookup('pipe', 'terraform output -raw c2_private_ip') }}"
+#
+# Approach 3: From inventory host variables
+# redirector_external_ip: "{{ ansible_host }}"
+# c2_private_ip: "{{ hostvars['c2-server-name']['ansible_host'] }}"
+#
+# Approach 4: From extra variables (pass at runtime)
+# uv run --locked ansible-playbook redirector-apache.yml -e redirector_external_ip=1.2.3.4 -e c2_private_ip=10.0.1.5
+
+# Default fallbacks (overridden in playbook)
+redirector_external_ip: "{{ ansible_ec2_public_ipv4 | default('') }}"
+
+# Sliver HTTP C2 port — must match c2_servers.yml c2_http_port
+c2_http_port: 8888

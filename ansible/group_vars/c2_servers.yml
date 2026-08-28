@@ -1,0 +1,25 @@
+---
+# Variables specific to C2 servers (Sliver)
+
+# Port layout — matches security group ingress rules:
+#   - Port 8888: Sliver HTTP listener, redirector subnet only
+#   - Port 4444: Sliver mTLS listener, VPN subnet only
+#   - Port 31337: Sliver operator gRPC, VPN subnet only
+#   - Port 443: HTTPS termination at redirector, forwarded to 8888
+#   - Port 22: SSH from VPN subnet only
+c2_https_port: 443
+c2_http_port: 8888
+c2_mtls_port: 4444
+c2_operator_port: 31337
+c2_install_dir: /opt/sliver
+
+
+# Packages required before Sliver binary runs
+c2_minimal_packages:
+  - python3
+  - curl
+  - git
+  - awscli
+  - ca-certificates
+
+

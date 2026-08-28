@@ -1,0 +1,50 @@
+---
+# Variables specific to VPN servers (Wireguard)
+
+# Wireguard configuration
+wireguard_interface: wg0
+wireguard_port: 51820
+wireguard_network: 10.8.0.0/24
+wireguard_server_ip: 10.8.0.1
+
+# Server configuration paths
+wireguard_config_dir: /etc/wireguard
+wireguard_config_file: "{{ wireguard_config_dir }}/{{ wireguard_interface }}.conf"
+wireguard_private_key_file: "{{ wireguard_config_dir }}/private.key"
+wireguard_public_key_file: "{{ wireguard_config_dir }}/public.key"
+
+# Network interface for internet access (usually the main interface)
+# Note: This is set dynamically in vpn-wireguard.yml after facts are gathered
+# Default fallback if not set dynamically
+wireguard_external_interface: "eth0"
+
+# DNS servers for clients
+wireguard_dns_servers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# Client configuration
+wireguard_clients_dir: "{{ wireguard_config_dir }}/clients"
+max_clients: 10
+
+# Client list - 5 operators by default
+wireguard_clients:
+  - name: "operator-1"
+    ip: "10.8.0.2"
+  - name: "operator-2"
+    ip: "10.8.0.3"
+  - name: "operator-3"
+    ip: "10.8.0.4"
+  - name: "operator-4"
+    ip: "10.8.0.5"
+  - name: "operator-5"
+    ip: "10.8.0.6"
+
+# S3 bucket for storing client configs (populated from Terraform output)
+# s3_bucket_name: "{{ terraform_s3_bucket_name }}"
+
+# Packages needed
+wireguard_packages:
+  - wireguard
+  - wireguard-tools
+  - qrencode  # For generating QR codes for mobile clients

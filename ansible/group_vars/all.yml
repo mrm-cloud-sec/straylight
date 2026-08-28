@@ -1,0 +1,59 @@
+---
+# Common variables for all servers
+# Keep sensitive data in vault.yml (encrypted with ansible-vault)
+
+# Global variables for all servers
+# Applied to all hosts regardless of group
+
+# C2 framework — shared between c2_servers and redirector_servers groups
+# Fixed UA baked into the Sliver HTTP C2 profile at deploy time.
+# Every implant generated with --c2profile straylight sends this exact string.
+# Apache htaccess matches it as a literal (dots escaped).
+c2_implant_ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36'
+c2_implant_ua_regex: 'Mozilla/5\.0 \(Macintosh; Intel Mac OS X 10_15_7\) AppleWebKit/537\.36 \(KHTML, like Gecko\) Chrome/106\.0\.0\.0 Safari/537\.36'
+c2_sliver_profile_name: 'straylight'
+
+# System settings
+ansible_python_interpreter: /usr/bin/python3
+timezone: "UTC"
+apply_hardening: true
+
+# Common packages needed on all servers (minimal set for security)
+common_packages:
+  - htop      # System monitoring
+  - tmux      # Terminal multiplexer for operations
+  - vim       # Text editor for config changes
+  - tree      # Directory tree viewer
+  - zip       # Create zip archives
+  - unzip     # Extract zip archives
+  - curl      # Download files from URLs
+
+# AWS settings (will be populated from Terraform or environment)
+aws_region: "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('eu-west-1') }}"
+# Get operation name from deployer (set as environment variable)
+operation_name: "{{ lookup('env', 'OPERATION_NAME') | default('unknown_op') }}"
+
+# Connection settings - use SSM instead of SSH
+ansible_connection: aws_ssm
+ansible_user: admin
+ansible_aws_ssm_bucket_name: "{{ lookup('env', 'TERRAFORM_S3_BUCKET') | default('') }}"
+ansible_aws_ssm_region: "{{ lookup('env', 'AWS_DEFAULT_REGION') | default('eu-west-1') }}"
+
+# S3 bucket from environment variable (set by deployer)
+terraform_s3_bucket_name: "{{ lookup('env', 'TERRAFORM_S3_BUCKET') | default('') }}"
+
+# Security settings
+ssh_port: 22
+allowed_ssh_users:
+  - admin
+  - ssm-user
+
+# SSM Connection Configuration (optimized for reliability)
+ansible_remote_tmp: /tmp/.ansible-${USER}/tmp
+
+# Connection reliability settings
+ansible_aws_ssm_timeout: 300
+ansible_aws_ssm_retries: 3
+
+# Performance optimization
+ansible_ssh_pipelining: true

@@ -1,0 +1,22 @@
+---
+# Main site playbook - runs all server configurations
+# Uses import_playbook for proper conditional execution
+
+# Run base hardening first - it updates apt on all servers
+- ansible.builtin.import_playbook: base-hardening.yml
+  when: apply_hardening | default(true)
+
+- ansible.builtin.import_playbook: vpn-wireguard.yml
+  when: groups['vpn_servers'] is defined and groups['vpn_servers']|length > 0
+
+- ansible.builtin.import_playbook: redirector-apache.yml
+  when: groups['redirector_servers'] is defined and groups['redirector_servers']|length > 0
+
+- ansible.builtin.import_playbook: c2-sliver.yml
+  when: groups['c2_servers'] is defined and groups['c2_servers']|length > 0
+
+- ansible.builtin.import_playbook: attack-server.yml
+  when: groups['attack_servers'] is defined and groups['attack_servers']|length > 0
+
+- ansible.builtin.import_playbook: efs-mount.yml
+  when: (groups['c2_servers'] is defined and groups['c2_servers']|length > 0) or (groups['attack_servers'] is defined and groups['attack_servers']|length > 0)

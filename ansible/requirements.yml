@@ -1,0 +1,24 @@
+---
+# Ansible Galaxy collection requirements
+# Install with: uv run --locked ansible-galaxy collection install -r ansible/requirements.yml
+
+collections:
+  # AWS inventory plugin (amazon.aws.aws_ec2)
+  - name: amazon.aws
+    version: ">=8.0.0"
+
+  # AWS SSM connection plugin (community.aws.aws_ssm)
+  - name: community.aws
+    version: ">=8.0.0"
+
+  # General utilities (timezone, apache2_module, make, etc.)
+  - name: community.general
+    version: ">=9.0.0"
+
+  # SSL/TLS certificate generation (openssl_privatekey, x509_certificate)
+  - name: community.crypto
+    version: ">=2.0.0"
+
+  # POSIX modules (sysctl, mount)
+  - name: ansible.posix
+    version: ">=1.5.0"

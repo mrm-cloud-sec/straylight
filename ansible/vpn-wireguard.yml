@@ -1,0 +1,116 @@
+---
+- name: Wireguard VPN Server Setup
+  hosts: "vpn_servers:&operation_{{ lookup('env', 'OPERATION_NAME') | default('unknown_op') }}"
+  become: true
+  serial: 1
+  gather_facts: false
+
+  vars:
+    # S3 bucket from environment variable (set by deployer)
+    terraform_s3_bucket_name: "{{ lookup('env', 'TERRAFORM_S3_BUCKET') | default('') }}"
+    # Connection optimization
+    ansible_ssh_pipelining: true
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=60 -o ServerAliveCountMax=3'
+
+  tasks:
+    # === Connection test ===
+    - name: Test connectivity first
+      ansible.builtin.ping:
+      retries: 3
+      delay: 5
+
+    - name: Gather minimal facts needed
+      ansible.builtin.setup:
+        gather_subset: ['!all', 'network', 'hardware']
+      retries: 3
+      delay: 10
+      timeout: 120
+
+    - name: Set external interface from gathered facts
+      ansible.builtin.set_fact:
+        wireguard_external_interface: "{{ ansible_facts['default_ipv4']['interface'] | default('eth0') }}"
+
+    # === Install packages ===
+    - name: Install Wireguard packages
+      ansible.builtin.apt:
+        name:
+          - wireguard
+          - wireguard-tools
+          - iptables-persistent
+        state: present
+      retries: 3
+      delay: 10
+      timeout: 300
+
+    # === System configuration ===
+    - name: Enable IP forwarding
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: '1'
+        state: present
+        reload: true
+      loop:
+        - net.ipv4.ip_forward
+        - net.ipv6.conf.all.forwarding
+
+    # === Directory setup ===
+    - name: Create Wireguard directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - /etc/wireguard
+        - /etc/wireguard/clients
+
+    # === Setup script execution ===
+    - name: Create setup script from template
+      ansible.builtin.template:
+        src: wireguard-setup.sh.j2
+        dest: /tmp/wireguard-setup.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Execute Wireguard setup script
+      ansible.builtin.shell: /tmp/wireguard-setup.sh
+      register: setup_result
+      timeout: 600
+      changed_when: false  # Script is idempotent; template task tracks actual changes
+
+    # === Upload to S3 ===
+    - name: Upload client configs to S3
+      ansible.builtin.shell: |
+        aws s3 cp "/tmp/operator-configs-{{ operation_name }}.tar.gz" \
+          "s3://{{ terraform_s3_bucket_name }}/wireguard/operator-configs-{{ operation_name }}.tar.gz" \
+          --sse AES256
+      retries: 3
+      delay: 5
+      timeout: 120
+      when: terraform_s3_bucket_name != ""
+      environment:
+        AWS_DEFAULT_REGION: "{{ lookup('env', 'AWS_DEFAULT_REGION') }}"
+      changed_when: false
+
+    # === Cleanup ===
+    - name: Clean up temporary files
+      ansible.builtin.shell: |
+        rm -f /tmp/wireguard-setup.sh
+        rm -f "/tmp/operator-configs-{{ operation_name }}.tar.gz"
+      timeout: 30
+      changed_when: false
+
+    # === Final status ===
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "VPN (WireGuard) — Setup Complete"
+          - ""
+          - "Operator configuration bundle:"
+          - "  - S3 Bucket: {{ terraform_s3_bucket_name }}"
+          - "  - S3 Key:    wireguard/operator-configs-{{ operation_name }}.tar.gz"
+          - ""
+          - "Next step: download the bundle from S3 and import it on your operator machine."
+      when: terraform_s3_bucket_name != ""

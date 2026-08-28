@@ -1,0 +1,99 @@
+# {{ ansible_managed }}
+# SSH Server Configuration - Hardened for Security
+# Based on Debian OpenSSH defaults with security enhancements
+
+# Basic configuration
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# Protocol and host keys
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Ciphers and keying
+RekeyLimit default none
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Authentication
+LoginGraceTime 120
+PermitRootLogin no
+StrictModes yes
+MaxAuthTries 3
+MaxSessions 10
+
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
+
+# Password authentication - disabled for security
+PasswordAuthentication no
+PermitEmptyPasswords no
+
+# PAM authentication (Debian standard)
+UsePAM yes
+ChallengeResponseAuthentication no
+
+# Kerberos options
+KerberosAuthentication no
+KerberosOrLocalPasswd yes
+KerberosTicketCleanup yes
+KerberosGetAFSToken no
+
+# GSSAPI options
+GSSAPIAuthentication no
+GSSAPICleanupCredentials yes
+GSSAPIStrictAcceptorCheck yes
+GSSAPIKeyExchange no
+
+# Host-based authentication
+HostbasedAuthentication no
+IgnoreUserKnownHosts yes
+IgnoreRhosts yes
+
+# Security settings
+X11Forwarding no
+X11DisplayOffset 10
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+PermitUserEnvironment no
+Compression delayed
+ClientAliveInterval 300
+ClientAliveCountMax 2
+UseDNS no
+MaxStartups 10:30:60
+PermitTunnel no
+
+# Privilege separation (security feature)
+UsePrivilegeSeparation sandbox
+
+# Version banner
+VersionAddendum none
+
+# Allow specific users/groups (uncomment and modify as needed)
+{% if ssh_allowed_users is defined %}
+AllowUsers {{ ssh_allowed_users | join(' ') }}
+{% endif %}
+{% if ssh_allowed_groups is defined %}
+AllowGroups {{ ssh_allowed_groups | join(' ') }}
+{% endif %}
+
+# Environment variables (Debian standard)
+AcceptEnv LANG LC_*
+
+# Subsystem (Debian standard path)
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# Strong ciphers, MACs, and key exchange algorithms
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256
+
+# Additional restrictions
+Banner none 

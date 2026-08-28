@@ -1,0 +1,63 @@
+---
+- name: Basic Server Hardening
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update package cache and upgrade system
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600
+      retries: 10
+      delay: 30
+      register: apt_update
+      until: apt_update is succeeded
+
+    - name: Install common packages
+      ansible.builtin.apt:
+        name: "{{ common_packages }}"
+        state: present
+      retries: 3
+      delay: 10
+
+    - name: Ensure tmux log directory exists
+      ansible.builtin.file:
+        path: /var/log/tmux
+        state: directory
+        owner: root
+        group: root
+        mode: '1777'
+
+    - name: Install admin tmux config
+      ansible.builtin.template:
+        src: tmux.conf.j2
+        dest: /home/admin/.tmux.conf
+        owner: admin
+        group: admin
+        mode: '0644'
+
+    # Network security handled by AWS Security Groups
+    # No need for host-based firewalls when using cloud-native security
+
+    - name: Secure SSH configuration
+      ansible.builtin.template:
+        src: sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: '0600'
+        backup: true
+        validate: /usr/sbin/sshd -t -f %s
+      notify: restart ssh
+
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+  handlers:
+    - name: restart ssh
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted

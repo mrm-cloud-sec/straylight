@@ -1,0 +1,24 @@
+RewriteEngine On
+
+{% if cloudfront_domains is defined and (cloudfront_domains | length) > 0 %}
+# CloudFront allowlist: only treat requests as "valid C2 ingress" when the Host header
+# matches one of the provisioned CloudFront distribution domains (*.cloudfront.net).
+# We mark these requests with an env var and require it on the proxy rules below.
+{% for d in cloudfront_domains %}
+RewriteCond %{HTTP_HOST} ^{{ d | replace('.', '\\.') }}$ [NC{% if not loop.last %},OR{% endif %}]
+{% endfor %}
+RewriteRule ^ - [E=CF_ALLOWED:1]
+{% else %}
+# CloudFront disabled: allow direct ingress (fallback mode)
+RewriteRule ^ - [E=CF_ALLOWED:1]
+{% endif %}
+
+# Sliver HTTP C2 — forward all UA-matched requests to Sliver listener
+# TLS terminates at the redirector; backend receives plain HTTP
+RewriteCond %{ENV:CF_ALLOWED} =1
+RewriteCond %{HTTP_USER_AGENT} "^{{ c2_implant_ua_regex }}$"
+RewriteRule ^(.*)$ http://{{ c2_private_ip | default('127.0.0.1') }}:{{ c2_http_port | default('8888') }}%{REQUEST_URI} [P,L]
+RequestHeader unset X-Forwarded-For
+
+# Catch-all: quiet 404 for everything else (avoids obvious redirector fingerprint)
+RewriteRule ^.*$ - [R=404,L]

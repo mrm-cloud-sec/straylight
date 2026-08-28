@@ -1,0 +1,14 @@
+[Unit]
+Description=Sliver C2 Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sliver-server daemon
+Environment=SLIVER_ROOT_DIR={{ c2_install_dir }}
+Environment=PATH={{ c2_install_dir }}/go/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

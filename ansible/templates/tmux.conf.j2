@@ -1,0 +1,10 @@
+# Increase history
+set -g history-limit 50000
+
+# LEGACY MODE (Safe for running server)
+# 1. Log new windows (instead of panes)
+set-hook -g after-new-window 'pipe-pane -o "cat >> \"/var/log/tmux/[#S][#I][#P][%Y%m%d-%H%M%S].log\""'
+
+# 2. Log new sessions
+set-hook -g session-created 'pipe-pane -o "cat >> \"/var/log/tmux/[#S][#I][#P][%Y%m%d-%H%M%S].log\""'
+
